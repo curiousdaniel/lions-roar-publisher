@@ -3,14 +3,39 @@ import { createWriteStream } from "node:fs";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import ffmpegPath from "ffmpeg-static";
+import { accessSync, constants } from "node:fs";
 
-if (!ffmpegPath) {
-  throw new Error("ffmpeg-static binary not available");
+function isExecutable(path: string): boolean {
+  try {
+    accessSync(path, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
 }
-const ffmpegBin = ffmpegPath;
+
+function resolveFfmpegBinary(): string {
+  const binaryName = process.platform === "win32" ? "ffmpeg.exe" : "ffmpeg";
+  const candidates = [
+    ffmpegPath || "",
+    resolve(process.cwd(), "node_modules", "ffmpeg-static", binaryName),
+    resolve(process.cwd(), ".next", "server", "node_modules", "ffmpeg-static", binaryName),
+  ].filter(Boolean);
+
+  for (const candidate of candidates) {
+    if (isExecutable(candidate)) {
+      return candidate;
+    }
+  }
+
+  throw new Error(
+    `ffmpeg binary not found in runtime bundle. Tried: ${candidates.join(", ")}`
+  );
+}
+const ffmpegBin = resolveFfmpegBinary();
 const TARGET_WIDTH = 1280;
 const TARGET_HEIGHT = 720;
 const VIDEO_FILTER = `scale=${TARGET_WIDTH}:${TARGET_HEIGHT}:force_original_aspect_ratio=decrease,pad=${TARGET_WIDTH}:${TARGET_HEIGHT}:(ow-iw)/2:(oh-ih)/2`;

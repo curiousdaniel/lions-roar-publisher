@@ -4,6 +4,10 @@ const nextConfig: NextConfig = {
   turbopack: {
     root: process.cwd(),
   },
+  serverExternalPackages: ["ffmpeg-static"],
+  outputFileTracingIncludes: {
+    "/api/process/worker": ["./node_modules/ffmpeg-static/**"],
+  },
   async headers() {
     return [
       {
