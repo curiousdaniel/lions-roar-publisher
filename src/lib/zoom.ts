@@ -49,35 +49,61 @@ export async function getZoomToken(): Promise<string> {
 
 export async function getRecentRecordings(limit = 5): Promise<ZoomRecording[]> {
   const token = await getZoomToken();
-  const fromDate = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-  const url = new URL("https://api.zoom.us/v2/users/me/recordings");
-  url.searchParams.set("from", fromDate);
-  url.searchParams.set("page_size", "30");
-
-  const response = await fetch(url, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-    },
-    cache: "no-store",
-  });
-
-  if (!response.ok) {
-    const details = await response.text();
-    throw new Error(`Failed to fetch recordings (${response.status}): ${details || response.statusText}`);
+  const accountId = process.env.ZOOM_ACCOUNT_ID;
+  if (!accountId) {
+    throw new Error("Missing ZOOM_ACCOUNT_ID");
   }
 
-  const data = (await response.json()) as {
-    meetings?: Array<{
-      id: string | number;
-      uuid: string;
-      topic: string;
-      start_time: string;
-      duration: number;
-      recording_files: ZoomRecording["recording_files"];
-    }>;
-  };
+  const allMeetings: Array<{
+    id: string | number;
+    uuid: string;
+    topic: string;
+    start_time: string;
+    duration: number;
+    recording_files: ZoomRecording["recording_files"];
+  }> = [];
 
-  const normalized = (data.meetings ?? [])
+  let nextPageToken = "";
+  for (let page = 0; page < 5; page += 1) {
+    const url = new URL(`https://api.zoom.us/v2/accounts/${accountId}/recordings`);
+    url.searchParams.set("page_size", "100");
+    if (nextPageToken) {
+      url.searchParams.set("next_page_token", nextPageToken);
+    }
+
+    const response = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+      cache: "no-store",
+    });
+
+    if (!response.ok) {
+      const details = await response.text();
+      throw new Error(`Failed to fetch recordings (${response.status}): ${details || response.statusText}`);
+    }
+
+    const data = (await response.json()) as {
+      meetings?: Array<{
+        id: string | number;
+        uuid: string;
+        topic: string;
+        start_time: string;
+        duration: number;
+        recording_files: ZoomRecording["recording_files"];
+      }>;
+      next_page_token?: string;
+    };
+
+    allMeetings.push(...(data.meetings ?? []));
+    nextPageToken = data.next_page_token ?? "";
+
+    if (!nextPageToken || allMeetings.length >= 200) {
+      break;
+    }
+  }
+
+  const normalized = allMeetings
     .map<ZoomRecording>((meeting) => ({
       id: String(meeting.id),
       uuid: meeting.uuid,
