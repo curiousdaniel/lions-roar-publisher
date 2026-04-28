@@ -24,6 +24,14 @@ export async function GET(request: Request) {
   }
 
   const token = await getZoomToken();
+  const directWithToken = new URL(target.toString());
+  directWithToken.searchParams.set("access_token", token);
+
+  const headCheck = await fetch(directWithToken, { method: "HEAD" });
+  if (headCheck.ok) {
+    return NextResponse.redirect(directWithToken.toString());
+  }
+
   const response = await fetch(target, {
     headers: {
       Authorization: `Bearer ${token}`,
@@ -31,7 +39,11 @@ export async function GET(request: Request) {
   });
 
   if (!response.ok || !response.body) {
-    return NextResponse.json({ error: "Failed to fetch recording" }, { status: response.status || 500 });
+    const details = await response.text().catch(() => "");
+    return NextResponse.json(
+      { error: "Failed to fetch recording", details: details.slice(0, 500) },
+      { status: response.status || 500 },
+    );
   }
 
   const headers = new Headers();

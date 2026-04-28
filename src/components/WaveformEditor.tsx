@@ -84,6 +84,7 @@ export function WaveformEditor({
   const [localVideoUrl, setLocalVideoUrl] = useState<string | null>(null);
   const [ready, setReady] = useState(false);
   const [playing, setPlaying] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const effectiveUrl = useMemo(() => {
     if (localVideoUrl) return localVideoUrl;
@@ -96,6 +97,8 @@ export function WaveformEditor({
 
     async function init() {
       if (!containerRef.current || !effectiveUrl) return;
+      setLoadError(null);
+      setReady(false);
 
       const WaveSurfer = (await import("wavesurfer.js")).default;
       const RegionsPlugin = (await import("wavesurfer.js/dist/plugins/regions.esm.js")).default;
@@ -148,7 +151,11 @@ export function WaveformEditor({
       ws.on("play", () => setPlaying(true));
       ws.on("pause", () => setPlaying(false));
 
-      await ws.load(effectiveUrl);
+      try {
+        await ws.load(effectiveUrl);
+      } catch {
+        setLoadError("Unable to load recording audio. Try selecting a local video file.");
+      }
     }
 
     void init();
@@ -205,6 +212,7 @@ export function WaveformEditor({
       {effectiveUrl ? (
         <>
           <div ref={containerRef} className="w-full" />
+          {loadError && <p className="mt-2 text-sm text-red-600">{loadError}</p>}
           <div className="mt-3 flex gap-4 text-sm text-zinc-700">
             <span>Start: {formatHms(trimStart)}</span>
             <span>End: {formatHms(trimEnd)}</span>
