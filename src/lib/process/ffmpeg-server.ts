@@ -1,65 +1,66 @@
-import { FFmpeg } from "@ffmpeg/ffmpeg";
-import { fetchFile } from "@ffmpeg/util";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { spawn } from "node:child_process";
+import ffmpegPath from "ffmpeg-static";
 
-let ffmpeg: FFmpeg | null = null;
-let loaded = false;
-
-async function loadFFmpegServer(): Promise<FFmpeg> {
-  if (!ffmpeg) {
-    ffmpeg = new FFmpeg();
-  }
-
-  if (!loaded) {
-    const base = "https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/umd";
-    await ffmpeg.load({
-      coreURL: `${base}/ffmpeg-core.js`,
-      wasmURL: `${base}/ffmpeg-core.wasm`,
-    });
-    loaded = true;
-  }
-
-  return ffmpeg;
+if (!ffmpegPath) {
+  throw new Error("ffmpeg-static binary not available");
 }
+const ffmpegBin = ffmpegPath;
 
-function toBytes(data: Uint8Array | string): Uint8Array {
-  return typeof data === "string" ? new TextEncoder().encode(data) : new Uint8Array(Array.from(data));
-}
+type ProcessOptions = {
+  sourceVideoUrl: string;
+  trimStart: number;
+  trimEnd: number;
+  splashStartUrl: string | null;
+  splashEndUrl: string | null;
+  bellStartUrl: string | null;
+  bellEndUrl: string | null;
+  onProgress: (progress: number) => Promise<void> | void;
+};
 
-function inferAssetKind(asset: string): "image" | "video" | "audio" {
-  const name = asset.toLowerCase();
-  if (/\.(png|jpg|jpeg|webp|gif)$/i.test(name)) return "image";
-  if (/\.(mp3|wav|m4a|aac|ogg)$/i.test(name)) return "audio";
+function inferAssetKind(url: string): "image" | "video" | "audio" {
+  const lower = url.toLowerCase();
+  if (/\.(png|jpg|jpeg|webp|gif)(\?|$)/.test(lower)) return "image";
+  if (/\.(mp3|wav|m4a|aac|ogg)(\?|$)/.test(lower)) return "audio";
   return "video";
 }
 
-async function createVideoSegment(instance: FFmpeg, inputName: string, outputName: string, kind: "image" | "video") {
-  if (kind === "image") {
-    await instance.exec([
-      "-loop",
-      "1",
-      "-i",
-      inputName,
-      "-t",
-      "3",
-      "-vf",
-      "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2",
-      "-c:v",
-      "libx264",
-      "-pix_fmt",
-      "yuv420p",
-      outputName,
-    ]);
-    return;
+async function downloadToFile(url: string, outputPath: string): Promise<void> {
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch asset (${response.status}): ${url}`);
   }
-
-  await instance.exec(["-i", inputName, "-c:v", "libx264", "-c:a", "aac", outputName]);
+  const bytes = Buffer.from(await response.arrayBuffer());
+  await writeFile(outputPath, bytes);
 }
 
-async function ensureMainHasAudio(instance: FFmpeg, inputName: string, outputName: string): Promise<void> {
+async function runFfmpeg(args: string[]): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const proc = spawn(ffmpegBin, ["-y", ...args], { stdio: ["ignore", "pipe", "pipe"] });
+    let stderr = "";
+
+    proc.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+
+    proc.on("error", reject);
+    proc.on("close", (code) => {
+      if (code === 0) {
+        resolve();
+      } else {
+        reject(new Error(`ffmpeg failed (${code}): ${stderr.slice(-2000)}`));
+      }
+    });
+  });
+}
+
+async function ensureMainHasAudio(inputPath: string, outputPath: string): Promise<void> {
   try {
-    await instance.exec([
+    await runFfmpeg([
       "-i",
-      inputName,
+      inputPath,
       "-map",
       "0:v:0",
       "-map",
@@ -68,12 +69,12 @@ async function ensureMainHasAudio(instance: FFmpeg, inputName: string, outputNam
       "libx264",
       "-c:a",
       "aac",
-      outputName,
+      outputPath,
     ]);
   } catch {
-    await instance.exec([
+    await runFfmpeg([
       "-i",
-      inputName,
+      inputPath,
       "-f",
       "lavfi",
       "-i",
@@ -87,89 +88,126 @@ async function ensureMainHasAudio(instance: FFmpeg, inputName: string, outputNam
       "libx264",
       "-c:a",
       "aac",
-      outputName,
+      outputPath,
     ]);
   }
 }
 
-async function overlayBell(instance: FFmpeg, videoInput: string, bellUrl: string | null, outputName: string): Promise<string> {
-  if (!bellUrl) return videoInput;
+async function renderSplashSegment(params: {
+  sourceUrl: string;
+  bellUrl: string | null;
+  tempDir: string;
+  outputPrefix: string;
+}): Promise<string> {
+  const kind = inferAssetKind(params.sourceUrl) === "image" ? "image" : "video";
+  const sourceExt = kind === "image" ? "png" : "mp4";
+  const sourcePath = join(params.tempDir, `${params.outputPrefix}_src.${sourceExt}`);
+  const renderedPath = join(params.tempDir, `${params.outputPrefix}_rendered.mp4`);
 
-  await instance.writeFile("bell.mp3", await fetchFile(bellUrl));
-  await instance.exec(["-i", videoInput, "-i", "bell.mp3", "-c:v", "copy", "-c:a", "aac", "-shortest", outputName]);
-  return outputName;
+  await downloadToFile(params.sourceUrl, sourcePath);
+
+  if (kind === "image") {
+    await runFfmpeg([
+      "-loop",
+      "1",
+      "-i",
+      sourcePath,
+      "-t",
+      "3",
+      "-vf",
+      "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2",
+      "-c:v",
+      "libx264",
+      "-pix_fmt",
+      "yuv420p",
+      renderedPath,
+    ]);
+  } else {
+    await runFfmpeg(["-i", sourcePath, "-c:v", "libx264", "-c:a", "aac", renderedPath]);
+  }
+
+  if (!params.bellUrl) {
+    return renderedPath;
+  }
+
+  const bellPath = join(params.tempDir, `${params.outputPrefix}_bell.mp3`);
+  const withBellPath = join(params.tempDir, `${params.outputPrefix}_with_bell.mp4`);
+  await downloadToFile(params.bellUrl, bellPath);
+  await runFfmpeg(["-i", renderedPath, "-i", bellPath, "-c:v", "copy", "-c:a", "aac", "-shortest", withBellPath]);
+  return withBellPath;
 }
 
-export async function processVideoServer(options: {
-  sourceVideoUrl: string;
-  trimStart: number;
-  trimEnd: number;
-  splashStartUrl: string | null;
-  splashEndUrl: string | null;
-  bellStartUrl: string | null;
-  bellEndUrl: string | null;
-  onProgress: (progress: number) => Promise<void> | void;
-}): Promise<Blob> {
-  const instance = await loadFFmpegServer();
+export async function processVideoServer(options: ProcessOptions): Promise<Blob> {
+  const tempDir = await mkdtemp(join(tmpdir(), "lions-roar-"));
 
-  instance.on("progress", ({ progress }) => {
-    void options.onProgress(Math.max(0, Math.min(95, 10 + Math.round(progress * 80))));
-  });
+  try {
+    const inputPath = join(tempDir, "input.mp4");
+    const trimmedRawPath = join(tempDir, "trimmed_raw.mp4");
+    const trimmedMainPath = join(tempDir, "trimmed_main.mp4");
+    const outputPath = join(tempDir, "output.mp4");
+    const concatPath = join(tempDir, "concat.txt");
 
-  await options.onProgress(2);
-  await instance.writeFile("input.mp4", await fetchFile(options.sourceVideoUrl));
+    await options.onProgress(2);
+    await downloadToFile(options.sourceVideoUrl, inputPath);
 
-  const start = Math.max(0, options.trimStart).toFixed(3);
-  const end = Math.max(options.trimStart + 0.5, options.trimEnd).toFixed(3);
+    const start = Math.max(0, options.trimStart).toFixed(3);
+    const end = Math.max(options.trimStart + 0.5, options.trimEnd).toFixed(3);
 
-  await options.onProgress(6);
-  await instance.exec(["-ss", start, "-to", end, "-i", "input.mp4", "-c", "copy", "trimmed_raw.mp4"]);
+    await options.onProgress(10);
+    await runFfmpeg(["-ss", start, "-to", end, "-i", inputPath, "-c", "copy", trimmedRawPath]);
 
-  await options.onProgress(18);
-  await ensureMainHasAudio(instance, "trimmed_raw.mp4", "trimmed_main.mp4");
+    await options.onProgress(25);
+    await ensureMainHasAudio(trimmedRawPath, trimmedMainPath);
 
-  let splashStartSegment: string | null = null;
-  if (options.splashStartUrl) {
-    const kind = inferAssetKind(options.splashStartUrl) === "image" ? "image" : "video";
-    const sourceName = kind === "image" ? "splash_start.png" : "splash_start.mp4";
-    await instance.writeFile(sourceName, await fetchFile(options.splashStartUrl));
-    await createVideoSegment(instance, sourceName, "splash_start_rendered.mp4", kind);
-    splashStartSegment = await overlayBell(instance, "splash_start_rendered.mp4", options.bellStartUrl, "splash_start_with_bell.mp4");
+    const parts: string[] = [];
+
+    if (options.splashStartUrl) {
+      const introSegment = await renderSplashSegment({
+        sourceUrl: options.splashStartUrl,
+        bellUrl: options.bellStartUrl,
+        tempDir,
+        outputPrefix: "splash_start",
+      });
+      parts.push(introSegment);
+    }
+
+    parts.push(trimmedMainPath);
+
+    if (options.splashEndUrl) {
+      const outroSegment = await renderSplashSegment({
+        sourceUrl: options.splashEndUrl,
+        bellUrl: options.bellEndUrl,
+        tempDir,
+        outputPrefix: "splash_end",
+      });
+      parts.push(outroSegment);
+    }
+
+    await options.onProgress(80);
+
+    const concatContent = `${parts.map((filePath) => `file '${filePath.replace(/'/g, "'\\''")}'`).join("\n")}\n`;
+    await writeFile(concatPath, concatContent, "utf8");
+
+    await runFfmpeg([
+      "-f",
+      "concat",
+      "-safe",
+      "0",
+      "-i",
+      concatPath,
+      "-c:v",
+      "libx264",
+      "-c:a",
+      "aac",
+      "-movflags",
+      "+faststart",
+      outputPath,
+    ]);
+
+    await options.onProgress(100);
+    const outputBuffer = await readFile(outputPath);
+    return new Blob([outputBuffer], { type: "video/mp4" });
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
   }
-
-  let splashEndSegment: string | null = null;
-  if (options.splashEndUrl) {
-    const kind = inferAssetKind(options.splashEndUrl) === "image" ? "image" : "video";
-    const sourceName = kind === "image" ? "splash_end.png" : "splash_end.mp4";
-    await instance.writeFile(sourceName, await fetchFile(options.splashEndUrl));
-    await createVideoSegment(instance, sourceName, "splash_end_rendered.mp4", kind);
-    splashEndSegment = await overlayBell(instance, "splash_end_rendered.mp4", options.bellEndUrl, "splash_end_with_bell.mp4");
-  }
-
-  const parts: string[] = [];
-  if (splashStartSegment) parts.push(splashStartSegment);
-  parts.push("trimmed_main.mp4");
-  if (splashEndSegment) parts.push(splashEndSegment);
-
-  await options.onProgress(88);
-  await instance.writeFile("concat.txt", toBytes(`${parts.map((name) => `file '${name}'`).join("\n")}\n`));
-  await instance.exec([
-    "-f",
-    "concat",
-    "-safe",
-    "0",
-    "-i",
-    "concat.txt",
-    "-c:v",
-    "libx264",
-    "-c:a",
-    "aac",
-    "-movflags",
-    "+faststart",
-    "output.mp4",
-  ]);
-
-  const output = await instance.readFile("output.mp4");
-  await options.onProgress(100);
-  return new Blob([new Uint8Array(Array.from(toBytes(output)))], { type: "video/mp4" });
 }
