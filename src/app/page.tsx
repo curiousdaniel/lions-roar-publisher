@@ -1,6 +1,9 @@
 import { kv } from "@vercel/kv";
+import { CheckRecordingsButton } from "@/app/CheckRecordingsButton";
 import { RecordingCard } from "@/components/RecordingCard";
 import type { IncomingRecording } from "@/types";
+
+export const dynamic = "force-dynamic";
 
 export default async function DashboardPage() {
   let recordings: IncomingRecording[] = [];
@@ -18,11 +21,7 @@ export default async function DashboardPage() {
         <p className="text-zinc-600">Online Sunday Service - The Shambhala Journey</p>
       </div>
 
-      <form action="/api/zoom/recordings" method="get">
-        <button className="rounded-md bg-[#C17D3C] px-4 py-2 text-sm font-medium text-white" type="submit">
-          Check for Recordings
-        </button>
-      </form>
+      <CheckRecordingsButton />
 
       <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
         Recordings appear here automatically when Zoom finishes processing. You&apos;ll also receive an email.
