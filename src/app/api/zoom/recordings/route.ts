@@ -1,16 +1,11 @@
 import { NextResponse } from "next/server";
 import { kv } from "@vercel/kv";
-import { getMeetingRecordings } from "@/lib/zoom";
+import { getRecentRecordings } from "@/lib/zoom";
 import type { IncomingRecording } from "@/types";
 
 export async function GET() {
   try {
-    const meetingId = process.env.ZOOM_MEETING_ID;
-    if (!meetingId) {
-      return NextResponse.json({ error: "Missing ZOOM_MEETING_ID" }, { status: 500 });
-    }
-
-    const recordings = await getMeetingRecordings(meetingId);
+    const recordings = await getRecentRecordings(5);
 
     if (process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN) {
       for (const item of recordings) {
@@ -21,7 +16,7 @@ export async function GET() {
 
         const incoming: IncomingRecording = {
           uuid: item.uuid,
-          meetingId,
+          meetingId: item.id,
           topic: item.topic,
           startTime: item.start_time,
           receivedAt: new Date().toISOString(),
