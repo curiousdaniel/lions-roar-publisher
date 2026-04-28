@@ -34,7 +34,8 @@ export async function getZoomToken(): Promise<string> {
   });
 
   if (!response.ok) {
-    throw new Error(`Failed to fetch Zoom token: ${response.statusText}`);
+    const details = await response.text();
+    throw new Error(`Failed to fetch Zoom token (${response.status}): ${details || response.statusText}`);
   }
 
   const data = (await response.json()) as ZoomTokenResponse;
@@ -56,7 +57,8 @@ export async function getMeetingRecordings(meetingId: string): Promise<ZoomRecor
   });
 
   if (!response.ok) {
-    throw new Error(`Failed to fetch recordings: ${response.statusText}`);
+    const details = await response.text();
+    throw new Error(`Failed to fetch recordings (${response.status}): ${details || response.statusText}`);
   }
 
   const data = (await response.json()) as {
