@@ -7,6 +7,7 @@ import { SplashUploader } from "@/components/SplashUploader";
 import { WaveformEditor } from "@/components/WaveformEditor";
 import { processVideo } from "@/lib/ffmpeg";
 import { toast } from "sonner";
+import type { ProcessingJob, ProcessingMode } from "@/types";
 import { useEditSession } from "./EditSessionContext";
 
 function isBlobUrl(value: string | null | undefined): value is string {
@@ -31,6 +32,9 @@ export function EditPageClient() {
   const [status, setStatus] = useState("Preparing...");
   const [youtubeUrl, setYoutubeUrl] = useState<string | null>(null);
   const [sourceFileSizeBytes, setSourceFileSizeBytes] = useState<number | null>(null);
+  const [activeJobId, setActiveJobId] = useState<string | null>(null);
+  const [activeJob, setActiveJob] = useState<ProcessingJob | null>(null);
+  const processingMode = process.env.NEXT_PUBLIC_PROCESSING_MODE === "background" ? "background" : "browser";
 
   useEffect(() => {
     return () => {
@@ -59,6 +63,95 @@ export function EditPageClient() {
   );
   const effectiveSourceSizeBytes = sourceFileSizeBytes ?? session.recording.recording_files[0]?.file_size ?? null;
   const isLargeFile = Boolean(effectiveSourceSizeBytes && effectiveSourceSizeBytes > 2 * 1024 * 1024 * 1024);
+
+  useEffect(() => {
+    if (processingMode !== "background") return;
+
+    const controller = new AbortController();
+    void (async () => {
+      try {
+        const response = await fetch(`/api/process/status?recordingUuid=${encodeURIComponent(session.recording.uuid)}`, {
+          signal: controller.signal,
+        });
+        const data = (await response.json()) as { job?: ProcessingJob | null };
+        if (data.job) {
+          setActiveJob(data.job);
+          setActiveJobId(data.job.id);
+        }
+      } catch {
+        // ignore background resume probe errors
+      }
+    })();
+
+    return () => controller.abort();
+  }, [processingMode, session.recording.uuid]);
+
+  useEffect(() => {
+    if (processingMode !== "background" || !activeJobId) return;
+
+    let cancelled = false;
+    const interval = setInterval(() => {
+      void (async () => {
+        try {
+          const response = await fetch(`/api/process/status?id=${encodeURIComponent(activeJobId)}`);
+          const data = (await response.json()) as { job?: ProcessingJob };
+          if (!cancelled && data.job) {
+            setActiveJob(data.job);
+            if (data.job.status === "completed" || data.job.status === "failed") {
+              setProcessing(false);
+              setUploading(false);
+            }
+          }
+        } catch {
+          // ignore transient poll errors
+        }
+      })();
+    }, 2500);
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [processingMode, activeJobId]);
+
+  async function enqueueBackgroundJob(mode: ProcessingMode): Promise<void> {
+    if (!sourceVideoUrl) {
+      throw new Error("Select a source video first.");
+    }
+    if (sourceVideoUrl.startsWith("blob:")) {
+      throw new Error("Background mode requires a Zoom/cloud URL. Local-only blob files require browser mode.");
+    }
+
+    const response = await fetch("/api/process/enqueue", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        mode,
+        recordingUuid: session.recording.uuid,
+        payload: {
+          sourceVideoUrl,
+          trimStart: session.trimStart,
+          trimEnd: session.trimEnd,
+          splashStartUrl: session.splashStartUrl,
+          splashEndUrl: session.splashEndUrl,
+          bellStartUrl: session.bellStartUrl,
+          bellEndUrl: session.bellEndUrl,
+          title: session.title,
+          description: session.description,
+        },
+      }),
+    });
+
+    const payload = (await response.json()) as { job?: ProcessingJob; error?: string; reused?: boolean };
+    if (!response.ok || !payload.job) {
+      throw new Error(payload.error ?? "Failed to enqueue processing job");
+    }
+
+    setActiveJob(payload.job);
+    setActiveJobId(payload.job.id);
+    setStatus(payload.reused ? "Using existing job..." : "Queued");
+    toast.success(payload.reused ? "Resumed existing background job." : "Background processing queued.");
+  }
 
   async function runProcessing(): Promise<Blob> {
     if (!sourceVideoUrl) {
@@ -99,16 +192,22 @@ export function EditPageClient() {
 
     try {
       setYoutubeUrl(null);
-      const output = await runProcessing();
-      downloadBlob(output, `${session.title.replace(/\s+/g, "-").toLowerCase() || "sunday-service"}.mp4`);
-      setStatus("Done");
-      toast.success("Video processed and downloaded.");
+      if (processingMode === "background") {
+        await enqueueBackgroundJob("download");
+      } else {
+        const output = await runProcessing();
+        downloadBlob(output, `${session.title.replace(/\s+/g, "-").toLowerCase() || "sunday-service"}.mp4`);
+        setStatus("Done");
+        toast.success("Video processed and downloaded.");
+      }
     } catch (error) {
       console.error(error);
       toast.error("Video processing failed. Check console for details.");
       setStatus("Failed");
     } finally {
-      setProcessing(false);
+      if (processingMode !== "background") {
+        setProcessing(false);
+      }
     }
   }
 
@@ -133,34 +232,40 @@ export function EditPageClient() {
     }
 
     try {
-      const output = await runProcessing();
+      if (processingMode === "background") {
+        await enqueueBackgroundJob("youtube");
+      } else {
+        const output = await runProcessing();
 
-      setStatus("Uploading to YouTube...");
-      const formData = new FormData();
-      formData.append("video", new File([output], "processed.mp4", { type: "video/mp4" }));
-      formData.append("title", session.title);
-      formData.append("description", session.description);
+        setStatus("Uploading to YouTube...");
+        const formData = new FormData();
+        formData.append("video", new File([output], "processed.mp4", { type: "video/mp4" }));
+        formData.append("title", session.title);
+        formData.append("description", session.description);
 
-      const response = await fetch("/api/youtube/upload", {
-        method: "POST",
-        body: formData,
-      });
+        const response = await fetch("/api/youtube/upload", {
+          method: "POST",
+          body: formData,
+        });
 
-      const payload = (await response.json()) as { youtubeUrl?: string; error?: string };
-      if (!response.ok || !payload.youtubeUrl) {
-        throw new Error(payload.error ?? "YouTube upload failed");
+        const payload = (await response.json()) as { youtubeUrl?: string; error?: string };
+        if (!response.ok || !payload.youtubeUrl) {
+          throw new Error(payload.error ?? "YouTube upload failed");
+        }
+
+        setYoutubeUrl(payload.youtubeUrl);
+        setStatus("Upload complete");
+        toast.success("Upload complete. Video is unlisted on YouTube.");
       }
-
-      setYoutubeUrl(payload.youtubeUrl);
-      setStatus("Upload complete");
-      toast.success("Upload complete. Video is unlisted on YouTube.");
     } catch (error) {
       console.error(error);
       toast.error(error instanceof Error ? error.message : "YouTube upload failed.");
       setStatus("Failed");
     } finally {
-      setUploading(false);
-      setProcessing(false);
+      if (processingMode !== "background") {
+        setUploading(false);
+        setProcessing(false);
+      }
     }
   }
 
@@ -237,6 +342,7 @@ export function EditPageClient() {
 
       <div className="rounded-xl border border-zinc-200 bg-white p-4 text-sm text-zinc-700">
         <h2 className="mb-2 text-base font-semibold text-zinc-900">Processing Summary</h2>
+        <p>Mode: {processingMode === "background" ? "Durable background queue" : "In-browser processing"}</p>
         <p>Title: {session.title}</p>
         <p>Trim Range: {Math.floor(session.trimStart)}s - {Math.floor(session.trimEnd)}s</p>
         <p>Intro Splash: {session.splashStartUrl ? "Set" : "None"}</p>
@@ -249,6 +355,32 @@ export function EditPageClient() {
       {isLargeFile && (
         <div className="rounded-xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900">
           Source file appears larger than 2GB. Processing can be slow; close other browser tabs for best results.
+        </div>
+      )}
+
+      {processingMode === "background" && activeJob && (
+        <div className="rounded-xl border border-blue-200 bg-blue-50 p-4 text-sm text-blue-900">
+          <p className="font-medium">Background Job: {activeJob.status}</p>
+          <p>Progress: {activeJob.progress}%</p>
+          <p>Job ID: {activeJob.id}</p>
+          {activeJob.status === "completed" && activeJob.outputUrl && (
+            <p>
+              Output:{" "}
+              <a href={activeJob.outputUrl} target="_blank" rel="noreferrer" className="underline">
+                Download processed video
+              </a>
+            </p>
+          )}
+          {activeJob.status === "completed" && activeJob.youtubeUrl && (
+            <p>
+              YouTube:{" "}
+              <a href={activeJob.youtubeUrl} target="_blank" rel="noreferrer" className="underline">
+                {activeJob.youtubeUrl}
+              </a>
+            </p>
+          )}
+          {activeJob.status === "failed" && activeJob.error && <p>Error: {activeJob.error}</p>}
+          <p className="mt-2 text-xs">You can close this tab and come back later. Job status is persisted.</p>
         </div>
       )}
 
@@ -271,7 +403,7 @@ export function EditPageClient() {
         </button>
       </div>
 
-      {processing && (
+      {processing && processingMode !== "background" && (
         <ProcessingModal progress={progress} status={status} onClose={() => setProcessing(false)} canClose={!processing && !uploading} />
       )}
       {youtubeUrl && (

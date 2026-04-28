@@ -52,3 +52,33 @@ export interface IncomingRecording {
   status: "pending" | "editing" | "published";
   recordingFiles: ZoomRecordingFile[];
 }
+
+export type ProcessingMode = "download" | "youtube";
+export type ProcessingJobStatus = "queued" | "running" | "completed" | "failed";
+
+export interface ProcessingJobPayload {
+  sourceVideoUrl: string;
+  trimStart: number;
+  trimEnd: number;
+  splashStartUrl: string | null;
+  splashEndUrl: string | null;
+  bellStartUrl: string | null;
+  bellEndUrl: string | null;
+  title: string;
+  description: string;
+}
+
+export interface ProcessingJob {
+  id: string;
+  recordingUuid: string;
+  mode: ProcessingMode;
+  status: ProcessingJobStatus;
+  progress: number;
+  error: string | null;
+  outputUrl: string | null;
+  youtubeUrl: string | null;
+  payload: ProcessingJobPayload;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+}
