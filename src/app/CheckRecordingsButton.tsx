@@ -12,13 +12,22 @@ export function CheckRecordingsButton() {
     setLoading(true);
     try {
       const response = await fetch("/api/zoom/recordings", { method: "GET" });
-      const payload = (await response.json()) as { recordings?: unknown[]; error?: string };
+      const payload = (await response.json()) as {
+        recordings?: unknown[];
+        error?: string;
+        source?: "account" | "user";
+        warning?: string;
+      };
 
       if (!response.ok) {
         throw new Error(payload.error ?? "Failed to check recordings");
       }
 
-      toast.success(`Checked Zoom. Found ${payload.recordings?.length ?? 0} recording(s).`);
+      if (payload.warning) {
+        toast.warning(payload.warning);
+      }
+      const sourceLabel = payload.source === "user" ? "users/me fallback" : "account";
+      toast.success(`Checked Zoom (${sourceLabel}). Found ${payload.recordings?.length ?? 0} recording(s).`);
       router.refresh();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Failed to check recordings");

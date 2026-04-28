@@ -5,6 +5,23 @@ type ZoomTokenResponse = {
   expires_in: number;
 };
 
+type ZoomMeetingEntry = {
+  id: string | number;
+  uuid: string;
+  topic: string;
+  start_time: string;
+  duration: number;
+  recording_files: ZoomRecording["recording_files"];
+};
+
+type RecordingsFetchResult = {
+  recordings: ZoomRecording[];
+  source: "account" | "user";
+  warning?: string;
+};
+
+const scopeFallbackCode = '"code":4711';
+
 let tokenCache: { token: string; expiresAt: number } | null = null;
 
 export async function getZoomToken(): Promise<string> {
@@ -47,51 +64,29 @@ export async function getZoomToken(): Promise<string> {
   return data.access_token;
 }
 
-export async function getRecentRecordings(limit = 5): Promise<ZoomRecording[]> {
-  const token = await getZoomToken();
-  const accountId = process.env.ZOOM_ACCOUNT_ID;
-  if (!accountId) {
-    throw new Error("Missing ZOOM_ACCOUNT_ID");
-  }
-
-  const allMeetings: Array<{
-    id: string | number;
-    uuid: string;
-    topic: string;
-    start_time: string;
-    duration: number;
-    recording_files: ZoomRecording["recording_files"];
-  }> = [];
+async function fetchRecordingsFromEndpoint(params: {
+  token: string;
+  urlFactory: (nextPageToken: string) => URL;
+}): Promise<{ meetings: ZoomMeetingEntry[]; lastErrorBody?: string; status?: number }> {
+  const allMeetings: ZoomMeetingEntry[] = [];
 
   let nextPageToken = "";
   for (let page = 0; page < 5; page += 1) {
-    const url = new URL(`https://api.zoom.us/v2/accounts/${accountId}/recordings`);
-    url.searchParams.set("page_size", "100");
-    if (nextPageToken) {
-      url.searchParams.set("next_page_token", nextPageToken);
-    }
-
+    const url = params.urlFactory(nextPageToken);
     const response = await fetch(url, {
       headers: {
-        Authorization: `Bearer ${token}`,
+        Authorization: `Bearer ${params.token}`,
       },
       cache: "no-store",
     });
 
     if (!response.ok) {
       const details = await response.text();
-      throw new Error(`Failed to fetch recordings (${response.status}): ${details || response.statusText}`);
+      return { meetings: [], lastErrorBody: details, status: response.status };
     }
 
     const data = (await response.json()) as {
-      meetings?: Array<{
-        id: string | number;
-        uuid: string;
-        topic: string;
-        start_time: string;
-        duration: number;
-        recording_files: ZoomRecording["recording_files"];
-      }>;
+      meetings?: ZoomMeetingEntry[];
       next_page_token?: string;
     };
 
@@ -103,7 +98,11 @@ export async function getRecentRecordings(limit = 5): Promise<ZoomRecording[]> {
     }
   }
 
-  const normalized = allMeetings
+  return { meetings: allMeetings };
+}
+
+function normalizeRecentMeetings(meetings: ZoomMeetingEntry[], limit: number): ZoomRecording[] {
+  return meetings
     .map<ZoomRecording>((meeting) => ({
       id: String(meeting.id),
       uuid: meeting.uuid,
@@ -115,7 +114,62 @@ export async function getRecentRecordings(limit = 5): Promise<ZoomRecording[]> {
       ),
     }))
     .filter((item) => item.recording_files.length > 0)
-    .sort((a, b) => new Date(b.start_time).getTime() - new Date(a.start_time).getTime());
+    .sort((a, b) => new Date(b.start_time).getTime() - new Date(a.start_time).getTime())
+    .slice(0, limit);
+}
 
-  return normalized.slice(0, limit);
+export async function getRecentRecordings(limit = 5): Promise<RecordingsFetchResult> {
+  const token = await getZoomToken();
+  const accountId = process.env.ZOOM_ACCOUNT_ID;
+  if (!accountId) {
+    throw new Error("Missing ZOOM_ACCOUNT_ID");
+  }
+
+  const accountFetch = await fetchRecordingsFromEndpoint({
+    token,
+    urlFactory: (nextPageToken) => {
+      const url = new URL(`https://api.zoom.us/v2/accounts/${accountId}/recordings`);
+      url.searchParams.set("page_size", "100");
+      if (nextPageToken) url.searchParams.set("next_page_token", nextPageToken);
+      return url;
+    },
+  });
+
+  if (accountFetch.meetings.length > 0) {
+    return { recordings: normalizeRecentMeetings(accountFetch.meetings, limit), source: "account" };
+  }
+
+  const isScopeFallback = Boolean(
+    accountFetch.status === 400 && accountFetch.lastErrorBody?.includes(scopeFallbackCode),
+  );
+
+  if (!isScopeFallback && accountFetch.status) {
+    throw new Error(
+      `Failed to fetch recordings (${accountFetch.status}): ${accountFetch.lastErrorBody ?? "Unknown response"}`,
+    );
+  }
+
+  const userFetch = await fetchRecordingsFromEndpoint({
+    token,
+    urlFactory: (nextPageToken) => {
+      const fromDate = new Date(Date.now() - 180 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+      const url = new URL("https://api.zoom.us/v2/users/me/recordings");
+      url.searchParams.set("from", fromDate);
+      url.searchParams.set("page_size", "100");
+      if (nextPageToken) url.searchParams.set("next_page_token", nextPageToken);
+      return url;
+    },
+  });
+
+  if (userFetch.status) {
+    throw new Error(`Failed to fetch recordings (${userFetch.status}): ${userFetch.lastErrorBody ?? "Unknown response"}`);
+  }
+
+  return {
+    recordings: normalizeRecentMeetings(userFetch.meetings, limit),
+    source: "user",
+    warning: isScopeFallback
+      ? "Fell back to users/me recordings because account-level recording scope was rejected by Zoom token."
+      : undefined,
+  };
 }

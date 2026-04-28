@@ -5,7 +5,8 @@ import type { IncomingRecording } from "@/types";
 
 export async function GET() {
   try {
-    const recordings = await getRecentRecordings(5);
+    const result = await getRecentRecordings(5);
+    const recordings = result.recordings;
 
     if (process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN) {
       for (const item of recordings) {
@@ -29,7 +30,7 @@ export async function GET() {
       }
     }
 
-    return NextResponse.json({ recordings });
+    return NextResponse.json({ recordings, source: result.source, warning: result.warning });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
     console.error("GET /api/zoom/recordings failed", error);
