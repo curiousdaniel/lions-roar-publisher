@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { createReadStream } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { put } from "@vercel/blob";
 import { NextResponse } from "next/server";
 import {
@@ -27,12 +29,13 @@ function isAuthorized(request: Request): boolean {
 
 async function uploadToYouTubeViaApi(params: {
   origin: string;
-  output: Blob;
+  outputPath: string;
   title: string;
   description: string;
 }): Promise<string | null> {
+  const outputBuffer = await readFile(params.outputPath);
   const formData = new FormData();
-  formData.append("video", new File([params.output], "processed.mp4", { type: "video/mp4" }));
+  formData.append("video", new File([outputBuffer], "processed.mp4", { type: "video/mp4" }));
   formData.append("title", params.title);
   formData.append("description", params.description);
 
@@ -76,6 +79,7 @@ export async function POST(request: Request) {
   }
 
   let currentJobId: string | null = null;
+  let currentCleanup: (() => Promise<void>) | null = null;
   try {
     const jobId = await popQueuedJobId();
     currentJobId = jobId;
@@ -90,11 +94,11 @@ export async function POST(request: Request) {
 
     await updateJob(jobId, { status: "running", startedAt: new Date().toISOString(), progress: 3, error: null });
 
-    let output: Blob | null = null;
+    let outputPath: string | null = null;
     let attemptError: unknown;
     for (let attempt = 1; attempt <= 2; attempt += 1) {
       try {
-        output = await processVideoServer({
+        const result = await processVideoServer({
           sourceVideoUrl: toWorkerFetchableSourceUrl(request.url, job.payload.sourceVideoUrl),
           trimStart: job.payload.trimStart,
           trimEnd: job.payload.trimEnd,
@@ -106,6 +110,8 @@ export async function POST(request: Request) {
             await updateJob(jobId, { progress });
           },
         });
+        outputPath = result.outputPath;
+        currentCleanup = result.cleanup;
         break;
       } catch (error) {
         attemptError = error;
@@ -116,11 +122,11 @@ export async function POST(request: Request) {
       }
     }
 
-    if (!output) {
+    if (!outputPath || !currentCleanup) {
       throw attemptError instanceof Error ? attemptError : new Error("Processing failed after retries");
     }
 
-    const blob = await put(`outputs/${job.recordingUuid}-${Date.now()}.mp4`, output, {
+    const blob = await put(`outputs/${job.recordingUuid}-${Date.now()}.mp4`, createReadStream(outputPath) as any, {
       access: getBlobAccessMode(),
       addRandomSuffix: true,
     });
@@ -129,11 +135,14 @@ export async function POST(request: Request) {
     if (job.mode === "youtube") {
       youtubeUrl = await uploadToYouTubeViaApi({
         origin: new URL(request.url).origin,
-        output,
+        outputPath,
         title: job.payload.title,
         description: job.payload.description,
       });
     }
+
+    await currentCleanup();
+    currentCleanup = null;
 
     await updateJob(jobId, {
       status: "completed",
@@ -147,6 +156,12 @@ export async function POST(request: Request) {
     return NextResponse.json({ status: "completed", jobId, outputUrl: blob.url, youtubeUrl });
   } catch (error) {
     console.error("Background worker failed", error);
+    if (currentCleanup) {
+      await currentCleanup().catch(() => {
+        // ignore cleanup failures in error path
+      });
+      currentCleanup = null;
+    }
 
     const message = error instanceof Error ? error.message : "Unknown worker error";
     if (currentJobId) {

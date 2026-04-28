@@ -1,4 +1,7 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createWriteStream } from "node:fs";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
@@ -20,6 +23,11 @@ type ProcessOptions = {
   onProgress: (progress: number) => Promise<void> | void;
 };
 
+export type ProcessVideoServerResult = {
+  outputPath: string;
+  cleanup: () => Promise<void>;
+};
+
 function inferAssetKind(url: string): "image" | "video" | "audio" {
   const lower = url.toLowerCase();
   if (/\.(png|jpg|jpeg|webp|gif)(\?|$)/.test(lower)) return "image";
@@ -29,11 +37,11 @@ function inferAssetKind(url: string): "image" | "video" | "audio" {
 
 async function downloadToFile(url: string, outputPath: string): Promise<void> {
   const response = await fetch(url);
-  if (!response.ok) {
+  if (!response.ok || !response.body) {
     throw new Error(`Failed to fetch asset (${response.status}): ${url}`);
   }
-  const bytes = Buffer.from(await response.arrayBuffer());
-  await writeFile(outputPath, bytes);
+
+  await pipeline(Readable.fromWeb(response.body as any), createWriteStream(outputPath));
 }
 
 async function runFfmpeg(args: string[]): Promise<void> {
@@ -137,8 +145,12 @@ async function renderSplashSegment(params: {
   return withBellPath;
 }
 
-export async function processVideoServer(options: ProcessOptions): Promise<Blob> {
+export async function processVideoServer(options: ProcessOptions): Promise<ProcessVideoServerResult> {
   const tempDir = await mkdtemp(join(tmpdir(), "lions-roar-"));
+
+  const cleanup = async () => {
+    await rm(tempDir, { recursive: true, force: true });
+  };
 
   try {
     const inputPath = join(tempDir, "input.mp4");
@@ -153,10 +165,10 @@ export async function processVideoServer(options: ProcessOptions): Promise<Blob>
     const start = Math.max(0, options.trimStart).toFixed(3);
     const end = Math.max(options.trimStart + 0.5, options.trimEnd).toFixed(3);
 
-    await options.onProgress(10);
+    await options.onProgress(12);
     await runFfmpeg(["-ss", start, "-to", end, "-i", inputPath, "-c", "copy", trimmedRawPath]);
 
-    await options.onProgress(25);
+    await options.onProgress(28);
     await ensureMainHasAudio(trimmedRawPath, trimmedMainPath);
 
     const parts: string[] = [];
@@ -183,7 +195,7 @@ export async function processVideoServer(options: ProcessOptions): Promise<Blob>
       parts.push(outroSegment);
     }
 
-    await options.onProgress(80);
+    await options.onProgress(82);
 
     const concatContent = `${parts.map((filePath) => `file '${filePath.replace(/'/g, "'\\''")}'`).join("\n")}\n`;
     await writeFile(concatPath, concatContent, "utf8");
@@ -205,9 +217,9 @@ export async function processVideoServer(options: ProcessOptions): Promise<Blob>
     ]);
 
     await options.onProgress(100);
-    const outputBuffer = await readFile(outputPath);
-    return new Blob([outputBuffer], { type: "video/mp4" });
-  } finally {
-    await rm(tempDir, { recursive: true, force: true });
+    return { outputPath, cleanup };
+  } catch (error) {
+    await cleanup();
+    throw error;
   }
 }
