@@ -21,16 +21,22 @@ export default async function EditPage({
   params: Promise<{ recordingId: string }>;
 }) {
   const { recordingId } = await params;
+  let decodedRecordingId = recordingId;
+  try {
+    decodedRecordingId = decodeURIComponent(recordingId);
+  } catch {
+    decodedRecordingId = recordingId;
+  }
 
   const settings = await getSettings();
 
   let incoming: IncomingRecording | null = null;
   if (process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN) {
-    incoming = await kv.get<IncomingRecording>(`recording:${recordingId}`);
+    incoming = await kv.get<IncomingRecording>(`recording:${decodedRecordingId}`);
   }
 
   const fallback: IncomingRecording = {
-    uuid: recordingId,
+    uuid: decodedRecordingId,
     meetingId: process.env.ZOOM_MEETING_ID ?? "",
     topic: "Sunday Service",
     startTime: new Date().toISOString(),
