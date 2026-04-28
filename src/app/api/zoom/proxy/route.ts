@@ -24,14 +24,6 @@ export async function GET(request: Request) {
   }
 
   const token = await getZoomToken();
-  const directWithToken = new URL(target.toString());
-  directWithToken.searchParams.set("access_token", token);
-
-  const headCheck = await fetch(directWithToken, { method: "HEAD" });
-  if (headCheck.ok) {
-    return NextResponse.redirect(directWithToken.toString());
-  }
-
   const response = await fetch(target, {
     headers: {
       Authorization: `Bearer ${token}`,
