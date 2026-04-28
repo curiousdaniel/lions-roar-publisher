@@ -61,6 +61,11 @@ export async function POST(request: Request) {
     recordingFiles: files,
   };
 
+  const added = await kv.sadd("recordings:index", incoming.uuid);
+  if (added === 0) {
+    return NextResponse.json({ status: "already-received" });
+  }
+
   await kv.set(`recording:${incoming.uuid}`, incoming);
   await kv.lpush("recordings:list", incoming.uuid);
 

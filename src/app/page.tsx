@@ -8,9 +8,10 @@ export const dynamic = "force-dynamic";
 export default async function DashboardPage() {
   let recordings: IncomingRecording[] = [];
   if (process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN) {
-    const ids = (await kv.lrange<string[]>("recordings:list", 0, 49).catch(() => [])) as unknown as string[];
+    const ids = (await kv.lrange<string[]>("recordings:list", 0, 199).catch(() => [])) as unknown as string[];
+    const uniqueIds = Array.from(new Set(ids)).slice(0, 50);
     recordings = (
-      await Promise.all(ids.map((id) => kv.get<IncomingRecording>(`recording:${id}`)))
+      await Promise.all(uniqueIds.map((id) => kv.get<IncomingRecording>(`recording:${id}`)))
     ).filter(Boolean) as IncomingRecording[];
   }
 

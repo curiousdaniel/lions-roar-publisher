@@ -14,6 +14,11 @@ export async function GET() {
 
     if (process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN) {
       for (const item of recordings) {
+        const added = await kv.sadd("recordings:index", item.uuid);
+        if (added === 0) {
+          continue;
+        }
+
         const incoming: IncomingRecording = {
           uuid: item.uuid,
           meetingId,
