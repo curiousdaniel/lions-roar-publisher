@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, unlink, writeFile } from "node:fs/promises";
 import { createWriteStream } from "node:fs";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -11,6 +11,11 @@ if (!ffmpegPath) {
   throw new Error("ffmpeg-static binary not available");
 }
 const ffmpegBin = ffmpegPath;
+const TARGET_WIDTH = 1280;
+const TARGET_HEIGHT = 720;
+const VIDEO_FILTER = `scale=${TARGET_WIDTH}:${TARGET_HEIGHT}:force_original_aspect_ratio=decrease,pad=${TARGET_WIDTH}:${TARGET_HEIGHT}:(ow-iw)/2:(oh-ih)/2`;
+const VIDEO_ENCODE_ARGS = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "29", "-pix_fmt", "yuv420p"];
+const AUDIO_ENCODE_ARGS = ["-c:a", "aac", "-b:a", "128k"];
 
 type ProcessOptions = {
   sourceVideoUrl: string;
@@ -64,25 +69,33 @@ async function runFfmpeg(args: string[]): Promise<void> {
   });
 }
 
-async function ensureMainHasAudio(inputPath: string, outputPath: string): Promise<void> {
+function standardEncodeArgs(outputPath: string): string[] {
+  return ["-vf", VIDEO_FILTER, ...VIDEO_ENCODE_ARGS, ...AUDIO_ENCODE_ARGS, outputPath];
+}
+
+async function ensureMainHasAudioFromSource(sourceUrl: string, start: string, end: string, outputPath: string): Promise<void> {
   try {
     await runFfmpeg([
+      "-ss",
+      start,
+      "-to",
+      end,
       "-i",
-      inputPath,
+      sourceUrl,
       "-map",
       "0:v:0",
       "-map",
       "0:a:0",
-      "-c:v",
-      "libx264",
-      "-c:a",
-      "aac",
-      outputPath,
+      ...standardEncodeArgs(outputPath),
     ]);
   } catch {
     await runFfmpeg([
+      "-ss",
+      start,
+      "-to",
+      end,
       "-i",
-      inputPath,
+      sourceUrl,
       "-f",
       "lavfi",
       "-i",
@@ -92,13 +105,15 @@ async function ensureMainHasAudio(inputPath: string, outputPath: string): Promis
       "0:v:0",
       "-map",
       "1:a:0",
-      "-c:v",
-      "libx264",
-      "-c:a",
-      "aac",
-      outputPath,
+      ...standardEncodeArgs(outputPath),
     ]);
   }
+}
+
+async function safeUnlink(path: string): Promise<void> {
+  await unlink(path).catch(() => {
+    // ignore missing/unlink race cleanup errors
+  });
 }
 
 async function renderSplashSegment(params: {
@@ -123,18 +138,16 @@ async function renderSplashSegment(params: {
       "-t",
       "3",
       "-vf",
-      "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2",
-      "-c:v",
-      "libx264",
-      "-pix_fmt",
-      "yuv420p",
+      VIDEO_FILTER,
+      ...VIDEO_ENCODE_ARGS,
       renderedPath,
     ]);
   } else {
-    await runFfmpeg(["-i", sourcePath, "-c:v", "libx264", "-c:a", "aac", renderedPath]);
+    await runFfmpeg(["-i", sourcePath, ...standardEncodeArgs(renderedPath)]);
   }
 
   if (!params.bellUrl) {
+    await safeUnlink(sourcePath);
     return renderedPath;
   }
 
@@ -142,6 +155,9 @@ async function renderSplashSegment(params: {
   const withBellPath = join(params.tempDir, `${params.outputPrefix}_with_bell.mp4`);
   await downloadToFile(params.bellUrl, bellPath);
   await runFfmpeg(["-i", renderedPath, "-i", bellPath, "-c:v", "copy", "-c:a", "aac", "-shortest", withBellPath]);
+  await safeUnlink(sourcePath);
+  await safeUnlink(renderedPath);
+  await safeUnlink(bellPath);
   return withBellPath;
 }
 
@@ -153,23 +169,15 @@ export async function processVideoServer(options: ProcessOptions): Promise<Proce
   };
 
   try {
-    const inputPath = join(tempDir, "input.mp4");
-    const trimmedRawPath = join(tempDir, "trimmed_raw.mp4");
     const trimmedMainPath = join(tempDir, "trimmed_main.mp4");
     const outputPath = join(tempDir, "output.mp4");
     const concatPath = join(tempDir, "concat.txt");
 
-    await options.onProgress(2);
-    await downloadToFile(options.sourceVideoUrl, inputPath);
-
     const start = Math.max(0, options.trimStart).toFixed(3);
     const end = Math.max(options.trimStart + 0.5, options.trimEnd).toFixed(3);
 
-    await options.onProgress(12);
-    await runFfmpeg(["-ss", start, "-to", end, "-i", inputPath, "-c", "copy", trimmedRawPath]);
-
-    await options.onProgress(28);
-    await ensureMainHasAudio(trimmedRawPath, trimmedMainPath);
+    await options.onProgress(8);
+    await ensureMainHasAudioFromSource(options.sourceVideoUrl, start, end, trimmedMainPath);
 
     const parts: string[] = [];
 
@@ -207,14 +215,16 @@ export async function processVideoServer(options: ProcessOptions): Promise<Proce
       "0",
       "-i",
       concatPath,
-      "-c:v",
-      "libx264",
-      "-c:a",
-      "aac",
+    ...VIDEO_ENCODE_ARGS,
+    ...AUDIO_ENCODE_ARGS,
       "-movflags",
       "+faststart",
       outputPath,
     ]);
+    await safeUnlink(concatPath);
+    for (const segment of parts) {
+      await safeUnlink(segment);
+    }
 
     await options.onProgress(100);
     return { outputPath, cleanup };
