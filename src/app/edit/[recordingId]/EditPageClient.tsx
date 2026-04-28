@@ -153,6 +153,35 @@ export function EditPageClient() {
     toast.success(payload.reused ? "Resumed existing background job." : "Background processing queued.");
   }
 
+  async function handleCancelAndStartFresh() {
+    if (processingMode !== "background") return;
+    if (!activeJob) {
+      toast.info("No active background job to cancel.");
+      return;
+    }
+
+    try {
+      const response = await fetch("/api/process/cancel", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: activeJob.id }),
+      });
+      const payload = (await response.json()) as { error?: string };
+      if (!response.ok) {
+        throw new Error(payload.error ?? "Failed to cancel job");
+      }
+
+      setActiveJob(null);
+      setActiveJobId(null);
+      setProcessing(false);
+      setUploading(false);
+      setStatus("Cancelled");
+      toast.success("Cancelled previous job. You can start fresh now.");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to cancel job");
+    }
+  }
+
   async function runProcessing(): Promise<Blob> {
     if (!sourceVideoUrl) {
       throw new Error("Select a source video first.");
@@ -381,6 +410,15 @@ export function EditPageClient() {
           )}
           {activeJob.status === "failed" && activeJob.error && <p>Error: {activeJob.error}</p>}
           <p className="mt-2 text-xs">You can close this tab and come back later. Job status is persisted.</p>
+          {(activeJob.status === "queued" || activeJob.status === "running") && (
+            <button
+              type="button"
+              onClick={handleCancelAndStartFresh}
+              className="mt-3 rounded-md border border-blue-300 bg-white px-3 py-2 text-xs font-medium text-blue-800"
+            >
+              Cancel & Start Fresh
+            </button>
+          )}
         </div>
       )}
 

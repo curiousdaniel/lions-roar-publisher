@@ -5,6 +5,7 @@ import type { ProcessingJob, ProcessingJobPayload, ProcessingMode } from "@/type
 const JOB_PREFIX = "job:";
 const QUEUE_KEY = "jobs:queue";
 const WORKER_LOCK_KEY = "jobs:worker:lock";
+const STALE_RUNNING_MS = 10 * 60 * 1000;
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -65,14 +66,38 @@ export async function getJob(id: string): Promise<ProcessingJob | null> {
 export async function getActiveJob(recordingUuid: string): Promise<ProcessingJob | null> {
   const id = await kv.get<string>(getActiveJobKey(recordingUuid));
   if (!id) return null;
-  return getJob(id);
+  const job = await getJob(id);
+  if (!job) return null;
+
+  if (job.status === "running") {
+    const heartbeat = Date.parse(job.finishedAt ?? job.startedAt ?? job.createdAt);
+    const stale = Number.isFinite(heartbeat) && Date.now() - heartbeat > STALE_RUNNING_MS;
+    if (stale) {
+      const staleJob: ProcessingJob = {
+        ...job,
+        status: "failed",
+        error: "Marked stale after no progress heartbeat.",
+        finishedAt: nowIso(),
+      };
+      await kv.set(getJobKey(job.id), staleJob);
+      await kv.del(getActiveJobKey(recordingUuid));
+      return staleJob;
+    }
+  }
+
+  return job;
 }
 
 export async function updateJob(id: string, patch: Partial<ProcessingJob>): Promise<ProcessingJob | null> {
   const current = await getJob(id);
   if (!current) return null;
 
-  const next: ProcessingJob = { ...current, ...patch };
+  const terminal = patch.status === "completed" || patch.status === "failed";
+  const next: ProcessingJob = {
+    ...current,
+    ...patch,
+    finishedAt: terminal ? nowIso() : patch.finishedAt ?? current.finishedAt,
+  };
   await kv.set(getJobKey(id), next);
 
   if (next.status === "completed" || next.status === "failed") {
@@ -84,6 +109,34 @@ export async function updateJob(id: string, patch: Partial<ProcessingJob>): Prom
 
 export async function popQueuedJobId(): Promise<string | null> {
   return (await kv.rpop<string>(getQueueKey())) ?? null;
+}
+
+export async function removeJobFromQueue(id: string): Promise<void> {
+  await kv.lrem(getQueueKey(), 0, id);
+}
+
+export async function cancelJobById(id: string): Promise<ProcessingJob | null> {
+  const job = await getJob(id);
+  if (!job) return null;
+
+  await removeJobFromQueue(id);
+  const cancelled: ProcessingJob = {
+    ...job,
+    status: "failed",
+    progress: 100,
+    error: "Cancelled by user.",
+    finishedAt: nowIso(),
+  };
+
+  await kv.set(getJobKey(id), cancelled);
+  await kv.del(getActiveJobKey(job.recordingUuid));
+  return cancelled;
+}
+
+export async function cancelActiveJob(recordingUuid: string): Promise<ProcessingJob | null> {
+  const active = await getActiveJob(recordingUuid);
+  if (!active) return null;
+  return cancelJobById(active.id);
 }
 
 export async function acquireWorkerLock(token: string): Promise<boolean> {
