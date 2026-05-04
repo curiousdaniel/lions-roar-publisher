@@ -173,3 +173,26 @@ export async function getRecentRecordings(limit = 5): Promise<RecordingsFetchRes
       : undefined,
   };
 }
+
+/**
+ * Fetches current recording file metadata for a meeting UUID.
+ * Zoom requires double-encoding the UUID in the path when it contains `/` or other reserved characters.
+ * Download URLs from webhooks or older KV entries expire; call this when loading the edit page.
+ */
+export async function refreshRecordingFilesForMeetingUuid(meetingUuid: string): Promise<ZoomRecording["recording_files"]> {
+  const token = await getZoomToken();
+  const pathId = encodeURIComponent(encodeURIComponent(meetingUuid));
+  const url = `https://api.zoom.us/v2/meetings/${pathId}/recordings`;
+  const response = await fetch(url, {
+    headers: { Authorization: `Bearer ${token}` },
+    cache: "no-store",
+  });
+
+  if (!response.ok) {
+    const details = await response.text();
+    throw new Error(`Zoom meeting recordings (${response.status}): ${details.slice(0, 400)}`);
+  }
+
+  const data = (await response.json()) as { recording_files?: ZoomRecording["recording_files"] };
+  return (data.recording_files ?? []).filter((f) => f.file_type === "MP4" && f.status === "completed");
+}

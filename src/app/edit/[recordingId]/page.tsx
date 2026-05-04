@@ -1,5 +1,6 @@
 import { kv } from "@vercel/kv";
 import { getSettings } from "@/lib/settings";
+import { refreshRecordingFilesForMeetingUuid } from "@/lib/zoom";
 import type { EditSession, IncomingRecording, ZoomRecording } from "@/types";
 import { EditPageClient } from "./EditPageClient";
 import { EditSessionProvider } from "./EditSessionContext";
@@ -33,6 +34,20 @@ export default async function EditPage({
   let incoming: IncomingRecording | null = null;
   if (process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN) {
     incoming = await kv.get<IncomingRecording>(`recording:${decodedRecordingId}`);
+  }
+
+  if (incoming && process.env.ZOOM_ACCOUNT_ID && process.env.ZOOM_CLIENT_ID && process.env.ZOOM_CLIENT_SECRET) {
+    try {
+      const freshFiles = await refreshRecordingFilesForMeetingUuid(incoming.uuid);
+      if (freshFiles.length > 0) {
+        incoming = { ...incoming, recordingFiles: freshFiles };
+        if (process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN) {
+          await kv.set(`recording:${incoming.uuid}`, incoming);
+        }
+      }
+    } catch {
+      // Keep KV snapshot if Zoom refresh fails (scopes, transient errors).
+    }
   }
 
   const fallback: IncomingRecording = {

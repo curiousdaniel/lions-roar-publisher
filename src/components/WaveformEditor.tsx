@@ -153,8 +153,11 @@ export function WaveformEditor({
 
       try {
         await ws.load(effectiveUrl);
-      } catch {
-        setLoadError("Unable to load recording audio. Try selecting a local video file.");
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        setLoadError(
+          `Unable to load recording audio (${detail}). Zoom links expire after a short time — reload this page to refresh, or choose a local video file.`,
+        );
       }
     }
 

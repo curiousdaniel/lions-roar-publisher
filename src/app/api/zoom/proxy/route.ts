@@ -24,9 +24,11 @@ export async function GET(request: Request) {
   }
 
   const token = await getZoomToken();
+  const range = request.headers.get("Range");
   const response = await fetch(target, {
     headers: {
       Authorization: `Bearer ${token}`,
+      ...(range ? { Range: range } : {}),
     },
   });
 
@@ -42,6 +44,10 @@ export async function GET(request: Request) {
   headers.set("Content-Type", response.headers.get("Content-Type") ?? "video/mp4");
   const contentLength = response.headers.get("Content-Length");
   if (contentLength) headers.set("Content-Length", contentLength);
+  const acceptRanges = response.headers.get("Accept-Ranges");
+  if (acceptRanges) headers.set("Accept-Ranges", acceptRanges);
+  const contentRange = response.headers.get("Content-Range");
+  if (contentRange) headers.set("Content-Range", contentRange);
 
-  return new NextResponse(response.body, { status: 200, headers });
+  return new NextResponse(response.body, { status: response.status, headers });
 }
