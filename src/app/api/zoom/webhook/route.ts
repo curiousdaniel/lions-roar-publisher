@@ -74,7 +74,7 @@ export async function POST(request: Request) {
     void notifyNewRecording({
       topic: incoming.topic,
       startTime: incoming.startTime,
-      editUrl: `${appUrl}/edit/${incoming.uuid}`,
+      editUrl: `${appUrl}/edit/${encodeURIComponent(incoming.uuid)}`,
     });
   }
 

@@ -9,7 +9,7 @@ export function RecordingCard({ recording }: { recording: IncomingRecording }) {
       <p className="text-sm text-zinc-600">{formatDate(recording.startTime)}</p>
       <p className="mt-1 text-sm text-zinc-600">Status: {recording.status}</p>
       <Link
-        href={`/edit/${recording.uuid}`}
+        href={`/edit/${encodeURIComponent(recording.uuid)}`}
         className="mt-3 inline-flex rounded-md bg-amber-700 px-3 py-2 text-sm font-medium text-white"
       >
         Edit & Publish
